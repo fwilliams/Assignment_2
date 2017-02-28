@@ -1,0 +1,5 @@
+build/libigl/nanogui
+build/libigl/nanogui/ext_build/glfw/src
+../libigl/include
+../libigl/external/nanogui/ext/eigen
+src
