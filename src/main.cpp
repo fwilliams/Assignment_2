@@ -20,7 +20,7 @@ Eigen::MatrixXd N;
 unsigned int polyDegree = 0;
 
 // Parameter: Wendland weight function radius (make this relative to the size of the mesh)
-double wendlandRadius = 0.1;
+double wendlandRadius = 0.02;
 
 // Parameter: grid resolution
 unsigned int resolution = 20;
@@ -130,13 +130,23 @@ void createGrid() {
     F. resize(0, 3);
     FN.resize(0, 3);
 
-    // Grid bounds: axis-aligned bounding box
-    Eigen::RowVector3d bb_min, bb_max;
-    bb_min = P.colwise().minCoeff();
-    bb_max = P.colwise().maxCoeff();
+    Eigen::RowVector3d mean = P.colwise().mean();
+    Eigen::MatrixXd PP = P.rowwise()-mean;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(PP.transpose() * PP);
+    Eigen::MatrixXd rot = solver.eigenvectors();
+    if (solver.eigenvectors().determinant() < 0.0) {
+        rot.col(0) = solver.eigenvectors().col(1);
+        rot.col(1) = solver.eigenvectors().col(0);
+    }
 
-    // Bounding box dimensions
-    Eigen::RowVector3d dim = 1.2 * (bb_max - bb_min);
+    // Grid bounds: axis-aligned bounding box
+    Eigen::MatrixXd Prot(P.rows(), 3);
+    for(size_t i = 0; i < P.rows(); i++) {
+        Prot.row(i) = (rot.transpose() * PP.row(i).transpose()).transpose();
+    }
+    Eigen::RowVector3d bb_min = Prot.colwise().minCoeff() + mean;
+    Eigen::RowVector3d bb_max = Prot.colwise().maxCoeff() + mean;
+    Eigen::RowVector3d dim = (bb_max - bb_min)*1.2;
 
     // Grid spacing
     const double dx = dim[0] / (double)(resolution - 1);
@@ -145,15 +155,17 @@ void createGrid() {
 
     // 3D positions of the grid points -- see slides or marching_cubes.h for ordering
     grid_points.resize(resolution * resolution * resolution, 3);
+
     // Create each gridpoint
     for (unsigned int x = 0; x < resolution; ++x) {
         for (unsigned int y = 0; y < resolution; ++y) {
             for (unsigned int z = 0; z < resolution; ++z) {
                 // Linear index of the point at (x,y,z)
+                Eigen::RowVector3d pt = bb_min -0.1*(bb_max-bb_min) + Eigen::RowVector3d(x*dx, y*dy, z*dz) - mean;
+                Eigen::Vector3d p = rot * pt.transpose() + mean.transpose();
                 int index = x + resolution * (y + resolution * z);
                 // 3D point at (x,y,z)
-
-                grid_points.row(index) = bb_min + -0.1*(bb_max-bb_min) + Eigen::RowVector3d(x * dx, y * dy, z * dz);
+                grid_points.row(index) = p.transpose();
             }
         }
     }
@@ -237,7 +249,7 @@ size_t numMonomials(size_t deg) {
     return ret;
 }
 
-Eigen::RowVectorXd enumerateMonomials2(const Eigen::RowVector3d& point, size_t outsize) {
+Eigen::RowVectorXd enumerateMonomials(const Eigen::RowVector3d& point, size_t outsize) {
     size_t pd1 = polyDegree + 1;
 
     Eigen::RowVectorXd ret(outsize);
@@ -304,7 +316,7 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
         cout << "there are " << grid_points.rows() << " grid points" << endl;
         for (size_t i = 0; i < grid_points.rows(); i+= 1) {
             Eigen::RowVector3d gp = grid_points.row(i);
-            size_t n = enumerateMonomials1(Eigen::RowVector3d(0, 0, 0)).cols();
+            size_t n = numMonomials(polyDegree);
 
             std::vector<std::pair<size_t, double>> ptsInRad = uniform_grid->pointsInBall(gp, wendlandRadius);
             auto B = Eigen::MatrixXd(ptsInRad.size(), n);
@@ -315,7 +327,7 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
             for(size_t j = 0; j < ptsInRad.size(); j += 1) {
                 double rOverH = ptsInRad[j].second / wendlandRadius;
                 W(j, j) = pow(1.0 - rOverH, 4.0) * (4.0*rOverH + 1.0);
-                B.row(j) = enumerateMonomials2(constrainedPoints.row(ptsInRad[j].first), n);
+                B.row(j) = enumerateMonomials(constrainedPoints.row(ptsInRad[j].first), n);
                 d(j) = constrainedValues[ptsInRad[j].first];
             }
 
@@ -329,23 +341,6 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
             auto b = B_t_W * d;
             Eigen::VectorXd sol = A.ldlt().solve(b);
 
-//            Eigen::VectorXd sol = B.colPivHouseholderQr().solve(d);
-//            cout << ptsInRad.size() << endl;
-//            Eigen::IOFormat CleanFmt(4, 0, ", ", "\n", "[", "]");
-//            cout << sol.format(CleanFmt) << endl << endl;
-//            cout << "A: " << endl;
-//            cout << A.format(CleanFmt) << endl << endl;
-//            cout << "b: " << endl;
-//            cout << b.format(CleanFmt) << endl << endl;
-//            cout << "B: " << endl;
-//            cout << B.format(CleanFmt)<< endl << endl;
-//            cout << "W: " << endl;
-//            cout << W.format(CleanFmt) << endl << endl;
-//            cout << "d: " << endl;
-//            cout << d.format(CleanFmt) << endl << endl;
-//            cout << "polyRes:" << endl;
-//            cout << evalPolynomial(sol, grid_points.row(i)) << endl << endl;
-//            cout << "--------------------------" << endl;
             grid_values[i] = evalPolynomial(sol, grid_points.row(i));
         }
 
