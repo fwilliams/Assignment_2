@@ -20,7 +20,7 @@ Eigen::MatrixXd N;
 unsigned int polyDegree = 0;
 
 // Parameter: Wendland weight function radius (make this relative to the size of the mesh)
-double wendlandRadius = 0.02;
+double wendlandRadius = 0.1;
 
 // Parameter: grid resolution
 unsigned int resolution = 20;
@@ -65,6 +65,7 @@ void evaluateImplicitFunc();
 void getLines();
 bool callbackKeyDown(Viewer& viewer, unsigned char key, int modifiers);
 
+Eigen::RowVector3d boundingBox;
 
 // Brute force nearest neighbor search
 size_t nearest_neighbor_brute_force(const Eigen::RowVector3d& p) {
@@ -84,7 +85,7 @@ size_t nearest_neighbor_brute_force(const Eigen::RowVector3d& p) {
 // Compute the set of constraints used to solve the implicit function
 void computeConstraints() {
     auto boundingBox = bounding_box(P);
-    double binWidth = boundingBox.norm() / pow(P.rows()*3, 1.0/3.0);
+    double binWidth = boundingBox.norm() / 100.0;//pow(P.rows()*3, 1.0/3.0);
     uniform_grid = std::unique_ptr<SparseUniformGrid>(new SparseUniformGrid(3*P.rows(), binWidth));
 
     cout << "Generating constraints..." << endl;
@@ -146,6 +147,7 @@ void createGrid() {
     }
     Eigen::RowVector3d bb_min = Prot.colwise().minCoeff() + mean;
     Eigen::RowVector3d bb_max = Prot.colwise().maxCoeff() + mean;
+    boundingBox = bb_max-bb_min;
     Eigen::RowVector3d dim = (bb_max - bb_min)*1.2;
 
     // Grid spacing
@@ -161,7 +163,7 @@ void createGrid() {
         for (unsigned int y = 0; y < resolution; ++y) {
             for (unsigned int z = 0; z < resolution; ++z) {
                 // Linear index of the point at (x,y,z)
-                Eigen::RowVector3d pt = bb_min -0.1*(bb_max-bb_min) + Eigen::RowVector3d(x*dx, y*dy, z*dz) - mean;
+                Eigen::RowVector3d pt = bb_min -0.1*(boundingBox) + Eigen::RowVector3d(x*dx, y*dy, z*dz) - mean;
                 Eigen::Vector3d p = rot * pt.transpose() + mean.transpose();
                 int index = x + resolution * (y + resolution * z);
                 // 3D point at (x,y,z)
@@ -314,24 +316,26 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
         // Evaluate implicit function
         grid_values.resize(grid_points.rows());
         cout << "there are " << grid_points.rows() << " grid points" << endl;
+        double wr = boundingBox.norm()*wendlandRadius;
+        cout << "the wendland radius is " << wr << endl;
         for (size_t i = 0; i < grid_points.rows(); i+= 1) {
             Eigen::RowVector3d gp = grid_points.row(i);
             size_t n = numMonomials(polyDegree);
 
-            std::vector<std::pair<size_t, double>> ptsInRad = uniform_grid->pointsInBall(gp, wendlandRadius);
-            auto B = Eigen::MatrixXd(ptsInRad.size(), n);
-            auto W = Eigen::MatrixXd(ptsInRad.size(), ptsInRad.size());
-            auto d = Eigen::VectorXd(ptsInRad.size());
+            std::vector<std::pair<size_t, double>> ptsInRad = uniform_grid->pointsInBall(gp, wr);
+            Eigen::MatrixXd B = Eigen::MatrixXd(ptsInRad.size(), n);
+            Eigen::MatrixXd W = Eigen::MatrixXd(ptsInRad.size(), ptsInRad.size());
+            Eigen::MatrixXd d = Eigen::VectorXd(ptsInRad.size());
             W.setZero(W.rows(), W.cols());
 
             for(size_t j = 0; j < ptsInRad.size(); j += 1) {
-                double rOverH = ptsInRad[j].second / wendlandRadius;
+                double rOverH = ptsInRad[j].second / wr;
                 W(j, j) = pow(1.0 - rOverH, 4.0) * (4.0*rOverH + 1.0);
                 B.row(j) = enumerateMonomials(constrainedPoints.row(ptsInRad[j].first), n);
                 d(j) = constrainedValues[ptsInRad[j].first];
             }
 
-            if (ptsInRad.size() == 0) {
+            if (ptsInRad.size() <= n) {
                 grid_values[i] = INFINITY;
                 continue;
             }
