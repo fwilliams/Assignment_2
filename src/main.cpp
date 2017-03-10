@@ -57,7 +57,7 @@ Eigen::MatrixXi F;
 Eigen::MatrixXd FN;
 
 // Data structure to accelerate nearest neighbor and ball queries
-std::unique_ptr<SparseUniformGrid> uniform_grid;
+std::unique_ptr<DenseUniformGrid> uniform_grid;
 
 // Functions
 void createGrid();
@@ -66,6 +66,61 @@ void getLines();
 bool callbackKeyDown(Viewer& viewer, unsigned char key, int modifiers);
 
 Eigen::RowVector3d boundingBox;
+
+// Count the number of monomials in a polynomial of
+size_t numMonomials(size_t deg) {
+    size_t ret = 0;
+
+    const size_t degree = deg + 1;
+    for (size_t i = 0; i < degree; i += 1) {
+        for (size_t j = 0; j < (degree - i); j += 1) {
+            for (size_t k = 0; k < (degree - i - j); k += 1) {
+                ret += 1;
+            }
+        }
+    }
+    return ret;
+}
+
+inline double fastPow(double a, size_t b) {
+  double res = 1.0;
+  for(size_t i = 0; i < b; i++) {
+      res *= a;
+  }
+  return res;
+}
+
+Eigen::RowVectorXd enumerateMonomials(const Eigen::RowVector3d& point, size_t outsize) {
+    size_t pd1 = polyDegree + 1;
+
+    Eigen::RowVectorXd ret(outsize);
+    size_t back = 0;
+    for (size_t i = 0; i < pd1; i += 1) {
+        for (size_t j = 0; j < (pd1 - i); j += 1) {
+            for (size_t k = 0; k < (pd1 - i - j); k += 1) {
+                ret(back) = fastPow(point(0), i) * fastPow(point(1), j) * fastPow(point(2), k);
+                back += 1;
+            }
+        }
+    }
+    return ret;
+}
+
+double evalPolynomial(const Eigen::RowVectorXd& coeffs, const Eigen::Vector3d& point) {
+    size_t pd1 = polyDegree + 1;
+
+    double ret = 0.0;
+    size_t back = 0;
+    for (size_t i = 0; i < pd1; i += 1) {
+        for (size_t j = 0; j < (pd1 - i); j += 1) {
+            for (size_t k = 0; k < (pd1 - i - j); k += 1) {
+                ret += coeffs(back) * fastPow(point(0), i) * fastPow(point(1), j) * fastPow(point(2), k);
+                back += 1;
+            }
+        }
+    }
+    return ret;
+}
 
 // Brute force nearest neighbor search
 size_t nearest_neighbor_brute_force(const Eigen::RowVector3d& p) {
@@ -84,9 +139,10 @@ size_t nearest_neighbor_brute_force(const Eigen::RowVector3d& p) {
 
 // Compute the set of constraints used to solve the implicit function
 void computeConstraints() {
-    auto boundingBox = bounding_box(P);
-    double binWidth = boundingBox.norm() / 100.0;//pow(P.rows()*3, 1.0/3.0);
-    uniform_grid = std::unique_ptr<SparseUniformGrid>(new SparseUniformGrid(3*P.rows(), binWidth));
+    Eigen::RowVector3d boundingBox = bounding_box(P);
+    Eigen::RowVector3d origin = P.colwise().minCoeff();
+    double binWidth = boundingBox.norm() / pow(P.rows()*3, 1.0/3.0);
+    uniform_grid = std::unique_ptr<DenseUniformGrid>(new DenseUniformGrid(boundingBox*1.1, origin-0.05*boundingBox, binWidth));
 
     cout << "Generating constraints..." << endl;
     uniform_grid->batchInsert(P);
@@ -115,7 +171,7 @@ void computeConstraints() {
         constrainedValues[2*P.rows()+i] = -(p_c - P.row(i)).norm();
     }
     uniform_grid->batchInsert(constrainedPoints.block(P.rows(), 0, 2*P.rows(), 3));
-    cout << "Sparse uniform grid has at most " << uniform_grid->maxPointsPerBin() << " points per bin" << std::endl;
+    cout << "Uniform grid has at most " << uniform_grid->maxPointsPerBin() << " points per bin" << std::endl;
 }
 
 // Creates a grid_points array for the simple sphere example. The points are
@@ -148,7 +204,7 @@ void createGrid() {
     Eigen::RowVector3d bb_min = Prot.colwise().minCoeff() + mean;
     Eigen::RowVector3d bb_max = Prot.colwise().maxCoeff() + mean;
     boundingBox = bb_max-bb_min;
-    Eigen::RowVector3d dim = (bb_max - bb_min)*1.2;
+    Eigen::RowVector3d dim = (bb_max - bb_min)*1.1;
 
     // Grid spacing
     const double dx = dim[0] / (double)(resolution - 1);
@@ -163,7 +219,7 @@ void createGrid() {
         for (unsigned int y = 0; y < resolution; ++y) {
             for (unsigned int z = 0; z < resolution; ++z) {
                 // Linear index of the point at (x,y,z)
-                Eigen::RowVector3d pt = bb_min -0.1*(boundingBox) + Eigen::RowVector3d(x*dx, y*dy, z*dz) - mean;
+                Eigen::RowVector3d pt = bb_min -0.05*(boundingBox) + Eigen::RowVector3d(x*dx, y*dy, z*dz) - mean;
                 Eigen::Vector3d p = rot * pt.transpose() + mean.transpose();
                 int index = x + resolution * (y + resolution * z);
                 // 3D point at (x,y,z)
@@ -180,28 +236,41 @@ void createGrid() {
 // Replace this with your own function for evaluating the implicit function
 // values at the grid points using MLS
 void evaluateImplicitFunc() {
-    // Sphere center
-    auto bb_min = grid_points.colwise().minCoeff().eval();
-    auto bb_max = grid_points.colwise().maxCoeff().eval();
-    Eigen::RowVector3d center = 0.5 * (bb_min + bb_max);
+    grid_values.resize(grid_points.rows());
+    double wr = boundingBox.norm()*wendlandRadius;
 
-    double radius = 0.5 * (bb_max - bb_min).minCoeff();
+    cout << "There are " << grid_points.rows() << " grid points" << endl;
+    cout << "The wendland radius is " << wr << endl;
 
-    // Scalar values of the grid points (the implicit function values)
-    grid_values.resize(resolution * resolution * resolution);
-
-    // Evaluate sphere's signed distance function at each gridpoint.
-    for (unsigned int x = 0; x < resolution; ++x) {
-        for (unsigned int y = 0; y < resolution; ++y) {
-            for (unsigned int z = 0; z < resolution; ++z) {
-                // Linear index of the point at (x,y,z)
-                int index = x + resolution * (y + resolution * z);
-
-                // Value at (x,y,z) = implicit function for the sphere
-                grid_values[index] = (grid_points.row(index) - center).norm() - radius;
-            }
+    const size_t int_rad = static_cast<size_t>(fabs(wr) / uniform_grid->binWidth())+1;
+    const size_t n = numMonomials(polyDegree);
+    std::vector<std::pair<size_t, double>> ptsInRad(int_rad*int_rad*int_rad*uniform_grid->maxPointsPerBin());
+    for (size_t i = 0; i < grid_points.rows(); i+= 1) {
+        size_t numPtsInRad = uniform_grid->pointsInBall(grid_points.row(i), wr, ptsInRad);
+        if (numPtsInRad < n) {
+            grid_values[i] = INFINITY;
+            continue;
         }
+
+        Eigen::MatrixXd B(numPtsInRad, n);
+        Eigen::DiagonalMatrix<double, Eigen::Dynamic> W(numPtsInRad);
+        Eigen::VectorXd d(numPtsInRad);
+        for(size_t j = 0; j < numPtsInRad; j += 1) {
+            double rOverH = ptsInRad[j].second / wr;
+            W.diagonal()[j] = pow(1.0 - rOverH, 4.0) * (4.0*rOverH + 1.0);
+            B.row(j) = enumerateMonomials(constrainedPoints.row(ptsInRad[j].first), n);
+            d[j] = constrainedValues[ptsInRad[j].first];
+        }
+
+        Eigen::MatrixXd B_t_W = B.transpose() * W;
+        Eigen::MatrixXd A = B_t_W * B;
+        Eigen::MatrixXd b = B_t_W * d;
+        Eigen::VectorXd sol = A.colPivHouseholderQr().solve(b);
+//        Eigen::VectorXd sol = (W*B).jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(d);
+        grid_values[i] = evalPolynomial(sol, grid_points.row(i));
     }
+
+    cout << "Done!" << endl;
 }
 
 // Code to display the grid lines given a grid structure of the given form.
@@ -236,52 +305,6 @@ void getLines() {
 }
 
 
-// Count the number of monomials in a polynomial of
-size_t numMonomials(size_t deg) {
-    size_t ret = 0;
-
-    const size_t degree = deg + 1;
-    for (size_t i = 0; i < degree; i += 1) {
-        for (size_t j = 0; j < (degree - i); j += 1) {
-            for (size_t k = 0; k < (degree - i - j); k += 1) {
-                ret += 1;
-            }
-        }
-    }
-    return ret;
-}
-
-Eigen::RowVectorXd enumerateMonomials(const Eigen::RowVector3d& point, size_t outsize) {
-    size_t pd1 = polyDegree + 1;
-
-    Eigen::RowVectorXd ret(outsize);
-    size_t back = 0;
-    for (size_t i = 0; i < pd1; i += 1) {
-        for (size_t j = 0; j < (pd1 - i); j += 1) {
-            for (size_t k = 0; k < (pd1 - i - j); k += 1) {
-                ret(back) = pow(point(0), i) * pow(point(1), j) * pow(point(2), k);
-                back += 1;
-            }
-        }
-    }
-    return ret;
-}
-
-double evalPolynomial(const Eigen::RowVectorXd& coeffs, const Eigen::Vector3d& point) {
-    size_t pd1 = polyDegree + 1;
-
-    double ret = 0.0;
-    size_t back = 0;
-    for (size_t i = 0; i < pd1; i += 1) {
-        for (size_t j = 0; j < (pd1 - i); j += 1) {
-            for (size_t k = 0; k < (pd1 - i - j); k += 1) {
-                ret += coeffs(back) * pow(point(0), i) * pow(point(1), j) * pow(point(2), k);
-                back += 1;
-            }
-        }
-    }
-    return ret;
-}
 
 bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
     if (key == '1') {
@@ -314,41 +337,7 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
         createGrid();
 
         // Evaluate implicit function
-        grid_values.resize(grid_points.rows());
-        cout << "there are " << grid_points.rows() << " grid points" << endl;
-        double wr = boundingBox.norm()*wendlandRadius;
-        cout << "the wendland radius is " << wr << endl;
-        for (size_t i = 0; i < grid_points.rows(); i+= 1) {
-            Eigen::RowVector3d gp = grid_points.row(i);
-            size_t n = numMonomials(polyDegree);
-
-            std::vector<std::pair<size_t, double>> ptsInRad = uniform_grid->pointsInBall(gp, wr);
-            Eigen::MatrixXd B = Eigen::MatrixXd(ptsInRad.size(), n);
-            Eigen::MatrixXd W = Eigen::MatrixXd(ptsInRad.size(), ptsInRad.size());
-            Eigen::MatrixXd d = Eigen::VectorXd(ptsInRad.size());
-            W.setZero(W.rows(), W.cols());
-
-            for(size_t j = 0; j < ptsInRad.size(); j += 1) {
-                double rOverH = ptsInRad[j].second / wr;
-                W(j, j) = pow(1.0 - rOverH, 4.0) * (4.0*rOverH + 1.0);
-                B.row(j) = enumerateMonomials(constrainedPoints.row(ptsInRad[j].first), n);
-                d(j) = constrainedValues[ptsInRad[j].first];
-            }
-
-            if (ptsInRad.size() <= n) {
-                grid_values[i] = INFINITY;
-                continue;
-            }
-
-            auto B_t_W = B.transpose() * W;
-            auto A = B_t_W * B;
-            auto b = B_t_W * d;
-            Eigen::VectorXd sol = A.ldlt().solve(b);
-
-            grid_values[i] = evalPolynomial(sol, grid_points.row(i));
-        }
-
-        cout << "done!" << endl;
+        evaluateImplicitFunc();
 
         // get grid lines
         getLines();
@@ -362,10 +351,8 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
             double value = grid_values(i);
             if (value < 0) {
                 grid_colors(i, 1) = 1;
-            }
-            else {
-                if (value > 0)
-                    grid_colors(i, 0) = 1;
+            } else if (value > 0) {
+                grid_colors(i, 0) = 1;
             }
         }
 
@@ -375,7 +362,6 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
         viewer.data.add_edges(grid_lines.block(0, 0, grid_lines.rows(), 3),
                               grid_lines.block(0, 3, grid_lines.rows(), 3),
                               Eigen::RowVector3d(0.8, 0.8, 0.8));
-        /*** end: sphere example ***/
     }
 
     if (key == '4') {
