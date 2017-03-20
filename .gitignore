@@ -1,1 +1,6 @@
+*.synctex.gz
+*.aux
+*.log
+*.creator
+*.creator.user
 build

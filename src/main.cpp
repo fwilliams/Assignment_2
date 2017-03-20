@@ -28,6 +28,12 @@ unsigned int resolution = 20;
 // Parameter: the size of the points to render
 unsigned pointSize = 4;
 
+// Parameter: Whether to use a sampling grid aligned with the principal components
+bool usePcaGrid = false;
+
+// Parameter: Multiplier for the uniform grid bin size. Increase this for smaller bins.
+double gridMultiplier = 1.0;
+
 // Intermediate result: constrained points, #C x3
 Eigen::MatrixXd constrainedPoints;
 
@@ -59,15 +65,11 @@ Eigen::MatrixXd FN;
 // Data structure to accelerate nearest neighbor and ball queries
 std::unique_ptr<DenseUniformGrid> uniform_grid;
 
-// Functions
-void createGrid();
-void evaluateImplicitFunc();
-void getLines();
-bool callbackKeyDown(Viewer& viewer, unsigned char key, int modifiers);
-
+// The bounding of the sample points
 Eigen::RowVector3d boundingBox;
 
-// Count the number of monomials in a polynomial of
+
+// Count the number of monomials in a tri-variate polynomial of degree deg
 size_t numMonomials(size_t deg) {
     size_t ret = 0;
 
@@ -136,12 +138,11 @@ size_t nearest_neighbor_brute_force(const Eigen::RowVector3d& p) {
     return min_i;
 }
 
-
 // Compute the set of constraints used to solve the implicit function
 void computeConstraints() {
     Eigen::RowVector3d boundingBox = bounding_box(P);
     Eigen::RowVector3d origin = P.colwise().minCoeff();
-    double binWidth = boundingBox.norm() / pow(P.rows()*3, 1.0/3.0);
+    double binWidth = boundingBox.norm() / (gridMultiplier * pow(P.rows()*3, 1.0/3.0));
     uniform_grid = std::unique_ptr<DenseUniformGrid>(new DenseUniformGrid(boundingBox*1.1, origin-0.05*boundingBox, binWidth));
 
     cout << "Generating constraints..." << endl;
@@ -174,11 +175,43 @@ void computeConstraints() {
     cout << "Uniform grid has at most " << uniform_grid->maxPointsPerBin() << " points per bin" << std::endl;
 }
 
-// Creates a grid_points array for the simple sphere example. The points are
-// stacked into a single matrix, ordered first in the x, then in the y and
-// then in the z direction. If you find it necessary, replace this with your own
-// function for creating the grid.
-void createGrid() {
+// Creates a grid_points array of points in the bounding box of the mesh
+void createGridAxisAligned() {
+    grid_points.resize(0, 3);
+    grid_colors.resize(0, 3);
+    grid_lines. resize(0, 6);
+    grid_values.resize(0);
+    V. resize(0, 3);
+    F. resize(0, 3);
+    FN.resize(0, 3);
+
+    Eigen::RowVector3d bb_min = P.colwise().minCoeff();
+    Eigen::RowVector3d bb_max = P.colwise().maxCoeff();
+    boundingBox = bb_max-bb_min;
+    Eigen::RowVector3d dim = (bb_max - bb_min)*1.2;
+
+    // Grid spacing
+    const double dx = dim[0] / (double)(resolution - 1);
+    const double dy = dim[1] / (double)(resolution - 1);
+    const double dz = dim[2] / (double)(resolution - 1);
+
+    // 3D positions of the grid points -- see slides or marching_cubes.h for ordering
+    grid_points.resize(resolution * resolution * resolution, 3);
+
+    // Create each gridpoint
+    for (unsigned int x = 0; x < resolution; ++x) {
+        for (unsigned int y = 0; y < resolution; ++y) {
+            for (unsigned int z = 0; z < resolution; ++z) {
+                // Linear index of the point at (x,y,z)
+                int index = x + resolution * (y + resolution * z);
+                grid_points.row(index) = bb_min -0.1*(boundingBox) + Eigen::RowVector3d(x*dx, y*dy, z*dz);
+            }
+        }
+    }
+}
+
+// Creates a grid_points array aligned with the principal directions of the mesh
+void createGridPcaAligned() {
     grid_points.resize(0, 3);
     grid_colors.resize(0, 3);
     grid_lines. resize(0, 6);
@@ -218,14 +251,25 @@ void createGrid() {
     for (unsigned int x = 0; x < resolution; ++x) {
         for (unsigned int y = 0; y < resolution; ++y) {
             for (unsigned int z = 0; z < resolution; ++z) {
-                // Linear index of the point at (x,y,z)
                 Eigen::RowVector3d pt = bb_min -0.05*(boundingBox) + Eigen::RowVector3d(x*dx, y*dy, z*dz) - mean;
                 Eigen::Vector3d p = rot * pt.transpose() + mean.transpose();
+
+                // Linear index of the point at (x,y,z)
                 int index = x + resolution * (y + resolution * z);
+
                 // 3D point at (x,y,z)
                 grid_points.row(index) = p.transpose();
             }
         }
+    }
+}
+
+// Creates a grid_points array around the mesh using the alignment specified by usePcaGrid
+void createGrid() {
+    if (usePcaGrid) {
+        createGridPcaAligned();
+    } else {
+        createGridAxisAligned();
     }
 }
 
@@ -384,6 +428,8 @@ bool callbackKeyDown(Viewer &viewer, unsigned char key, int modifiers) {
         viewer.core.show_lines = true;
         viewer.core.show_faces = true;
         viewer.data.set_normals(FN);
+
+        igl::writeOFF("output.off", V, F);
     }
 
     return true;
@@ -397,9 +443,10 @@ int main(int argc, char *argv[]) {
 
     // Read points and normals
     igl::readOFF(argv[1],P,F,N);
-
     Viewer viewer;
     viewer.callback_key_down = callbackKeyDown;
+
+//    viewer.data.set_mesh(P, F);
 
     viewer.callback_init = [&](Viewer &v) {
         // Add widgets to the sidebar.
@@ -407,6 +454,8 @@ int main(int argc, char *argv[]) {
         v.ngui->addVariable("Resolution", resolution);
         v.ngui->addVariable("Wendland Radius", wendlandRadius);
         v.ngui->addVariable("Polynomial Degree", polyDegree);
+        v.ngui->addVariable("Uniform grid bin size multiplier", gridMultiplier);
+        v.ngui->addVariable("Use PCA Grid", usePcaGrid);
         v.ngui->addButton("Reset Grid", [&](){
             // Recreate the grid
             createGrid();
